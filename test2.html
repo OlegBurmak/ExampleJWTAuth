@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+<body>
+    <div class="container">
+        <h1>Refresh Tokens in ASP.NET Web Api Core Demo Project</h1>
+        <h4>Access Token lifetime is set to @Model minute(s).</h4>
+        <h1>Signed in As: <span id="signedInAs">Anonymous</span></h1>
+
+      <div id="feedbackContainer" class="feedback"></div>
+
+      <fieldset>
+          <legend>Create New User</legend>
+          <label for="newUsername">Username</label>
+          <input type="text" id="newUsername"/>
+          <label for="password">Password</label>
+          <input type="password" id="password"/>              
+          <label for="repassword">Retype Password</label>
+          <input type="password" id="repassword"/>                            
+          <button id="btCreate">Create</button>              
+      </fieldset>
+
+      <fieldset>
+          <legend>Login</legend>
+          <label for="username">Username</label>
+          <input type="text" id="username"/>
+          <label for="loginPassword">Password</label>
+          <input type="password" id="loginPassword"/>              
+          <button id="btLogin">Login</button>              
+          <button id="btLogout">Logout</button>   
+      </fieldset>
+
+      <button id="btAuthenticatedRequest">Perform request that requires authentication</button>
+      <button id="btRevoke">Revoke Refresh Token</button>
+    </div>      
+
+
+
+    <script>
+        window.addEventListener('load', function (event) {
+    localStorage.clear(); //if the user refreshes the page the tokens are discarded
+
+    document.getElementById('btCreate').addEventListener('click', onAddNewUserClicked);
+    document.getElementById('btLogin').addEventListener('click', onLoginClicked);
+    document.getElementById('btLogout').addEventListener('click', onLogoutClicked);
+    document.getElementById('btAuthenticatedRequest').addEventListener('click', onPerformAuthenticatedRequestClicked);
+    document.getElementById('btRevoke').addEventListener('click', onRevokeClicked);
+});
+
+function writeFeedback(feedback) {
+    document.getElementById('feedbackContainer').textContent = feedback;
+}
+
+function onAddNewUserClicked() {
+    var username = document.getElementById('newUsername').value;
+    var password = document.getElementById('password').value;
+    var repassword = document.getElementById('repassword').value;
+
+    if (username === '') {
+        writeFeedback("Username is required");
+        return;
+    }
+
+    if (password != repassword) {
+        writeFeedback("Passwords don't match");
+        return;
+    }
+
+    fetch('http://localhost:5000/account/signup', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: `username=${username}&password=${password}`
+    }).then(response => {
+        if (response.ok)
+            writeFeedback(`User ${username} was created, you can now login`);
+        else
+            writeFeedback("Error creating new username, make sure you haven't used this username before");
+    });
+}
+
+async function onLoginClicked() {
+    var username = document.getElementById('username').value;
+    var password = document.getElementById('loginPassword').value;
+
+    try {
+        await login(username, password);
+        writeFeedback('');
+        document.getElementById('signedInAs').textContent = username;
+    } catch {
+        writeFeedback('Wrong username/password');
+    }
+}
+
+async function login(username, password) {
+    var loginResponse = await fetch('http://localhost:5000/login', {
+        method: 'POST',
+        body: "username=" + username + "&password=" + password,
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+    });
+    if (loginResponse.ok) {
+        var tokens = await loginResponse.json();
+        saveJwtToken(tokens.access_token);
+        saveRefreshToken(tokens.refresh_token);
+    } else {
+        throw new Error("Failed to login");
+    }
+}
+
+function onLogoutClicked() { //wouldn't be a bad idea to send a request to the server that would invalidate the refresh token
+    localStorage.clear();
+    document.getElementById('signedInAs').textContent = 'Anonymous';
+    writeFeedback('');
+}
+
+function getJwtToken() {
+    return localStorage.getItem('token');
+}
+function saveJwtToken(token) {
+    localStorage.setItem('token', token);
+}
+
+function saveRefreshToken(refreshToken) {
+    localStorage.setItem('refreshToken', refreshToken);
+}
+
+function getRefreshToken() {
+    return localStorage.getItem('refreshToken');
+}
+
+async function onPerformAuthenticatedRequestClicked() {
+    writeFeedback('');
+    var response = await fetchWithCredentials('http://localhost:5000/api/value/getlogin');
+    if (response.ok) {
+        writeFeedback(await response.text());
+    } else {
+        writeFeedback(`Request failed with status code: ${response.status}`);
+    }
+}
+
+async function onRevokeClicked(){
+    writeFeedback('');
+    var revokeResponse = await revoke();
+    if (revokeResponse.ok) {
+        writeFeedback('Refresh token was revoked, when the access token (JWT) expires authenticated requests will start to fail');        
+    } else {
+        writeFeedback(`Revoke failed with status code: ${revokeResponse.status}`);
+    }
+}
+
+async function fetchWithCredentials(url, options) {
+    var jwtToken = getJwtToken();
+    options = options || {};
+    options.headers = options.headers || {};
+    options.headers['Authorization'] = 'Bearer ' + jwtToken;
+    var response = await fetch(url, options);
+    if (response.ok) { //all is good, return the response
+        return response;
+    }
+
+    if (response.status === 401 || response.headers.has('Token-Expired')) {
+        var refreshToken = getRefreshToken();
+
+        var refreshResponse = await refresh(jwtToken, refreshToken);
+        if (!refreshResponse.ok) {
+            return response; //failed to refresh so return original 401 response
+        }
+        var jsonRefreshResponse = await refreshResponse.json(); //read the json with the new tokens
+
+        saveJwtToken(jsonRefreshResponse.token);
+        saveRefreshToken(jsonRefreshResponse.refreshToken);
+        return await fetchWithCredentials(url, options); //repeat the original request
+    } else { //status is not 401 and/or there's no Token-Expired header
+        return response; //return the original 401 response
+    }
+}
+
+function refresh(jwtToken, refreshToken) {
+    return fetch('http://localhost:5000/refresh', {
+        method: 'POST',
+        body: `token=${encodeURIComponent(jwtToken)}&refreshToken=${encodeURIComponent(getRefreshToken())}`,
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+    });
+}
+
+function revoke() {
+    return fetchWithCredentials('http://localhost:5000/token/revoke', {
+        method: 'POST'
+    });
+}
+    </script>
+</body>
+</html>
